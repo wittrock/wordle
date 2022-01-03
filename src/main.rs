@@ -5,7 +5,10 @@ use std::{
     fs,
     io::BufRead,
     io::BufReader,
+    thread,
 };
+
+const N_THREADS: usize = 24;
 
 fn is_possible_starting_word(word: &&String) -> bool {
     if word.len() != 5 {
@@ -89,10 +92,10 @@ fn score_single_words(
 fn score_word_pair(
     word1: &String,
     letter_frequencies: &BTreeMap<char, f32>,
-    words: &Vec<&String>,
+    all_words: &Vec<String>,
     score_map: &mut IndexMap<(String, String), f32>,
 ) {
-    for word2 in words {
+    for word2 in all_words {
         // We've already scored this pair, and don't want dups.
         // TODO(wittrock): does order matter here?
         if score_map
@@ -111,43 +114,95 @@ fn score_word_pair(
         score += score2;
 
         let word1_chars: Vec<char> = word1.chars().collect();
+
+        // Adjust scoring based on the contents of the other word.
         for (index, char) in word2.chars().enumerate() {
             // Don't give credit for this letter if it's in the same place in the other word.
             if word1_chars[index] == char {
+                score -= letter_frequencies.get(&char).unwrap();
                 continue;
             }
 
-            score -= letter_frequencies.get(&char).unwrap();
+            // If this letter appears at _all_ in the other word, only score it as half its normal
+            // value
+            if word1_chars.contains(&char) {
+                score -= letter_frequencies.get(&char).unwrap() / 2.0;
+            }
         }
 
         score_map.insert(((*word1).to_owned(), (*word2).to_owned()), score);
     }
 }
 
-fn score_word_pairs(
-    words: &Vec<&String>,
-    letter_frequencies: &BTreeMap<char, f32>,
+fn score_word_pairs_shard(
+    words_to_score: Vec<String>,
+    all_words: Vec<String>,
+    letter_frequencies: BTreeMap<char, f32>,
 ) -> IndexMap<(String, String), f32> {
     // We _don't_ want to give extra credit for letters in the same position in each word,
     // since they won't help us.
-    let mut pair_scores = IndexMap::<(String, String), f32>::new();
-
     println!(
         "Iterating over {} words, {} pairs",
-        words.len(),
-        words.len() * words.len()
+        words_to_score.len(),
+        words_to_score.len() * all_words.len()
     );
-    for (word_index, word1) in words.iter().enumerate() {
+
+    let mut pair_scores = IndexMap::<(String, String), f32>::new();
+    for (word_index, word1) in words_to_score.iter().enumerate() {
         if word_index % 100 == 0 {
             println!(
                 "[{}%]: {}",
-                ((word_index as f32 / words.len() as f32) * 100.0) as u32,
+                ((word_index as f32 / words_to_score.len() as f32) * 100.0) as u32,
                 word1
             );
         }
-        score_word_pair(word1, letter_frequencies, words, &mut pair_scores);
+        score_word_pair(word1, &letter_frequencies, &all_words, &mut pair_scores);
     }
 
+    // Only return the top 100 results from this shard. This risks missing some, but that's okay,
+    // it's about twice as fast.
+    pair_scores
+        .sorted_by(|_k1, v1, _k2, v2| v2.partial_cmp(v1).unwrap())
+        .take(100)
+        .collect::<IndexMap<(String, String), f32>>()
+}
+
+fn score_word_pairs(
+    all_words: Vec<String>,
+    letter_frequencies: BTreeMap<char, f32>,
+) -> IndexMap<(String, String), f32> {
+    let mut words_left = all_words.clone();
+
+    let mut thread_handles = Vec::new();
+
+    for _i in 0..N_THREADS {
+        let words_left_length = words_left.len();
+        let words_to_score = words_left.split_off(std::cmp::min(
+            words_left_length - (all_words.len() / N_THREADS),
+            words_left_length,
+        ));
+
+        let words_to_score_clone = words_to_score.to_vec();
+        let letter_frequencies_clone = letter_frequencies.clone();
+        let all_words_clone = all_words.clone();
+
+        let thread = thread::spawn(move || {
+            score_word_pairs_shard(
+                words_to_score_clone,
+                all_words_clone,
+                letter_frequencies_clone,
+            )
+        });
+
+        thread_handles.push(thread);
+    }
+
+    let mut pair_scores = IndexMap::<(String, String), f32>::new();
+    for t in thread_handles {
+        for ((word1, word2), score) in t.join().unwrap() {
+            pair_scores.insert((word1, word2), score);
+        }
+    }
     pair_scores
 }
 
@@ -195,7 +250,10 @@ fn main() -> std::io::Result<()> {
             .collect::<Vec<(String, f32)>>()
     );
 
-    let pair_scores = score_word_pairs(&starting_words, &frequencies);
+    let pair_scores = score_word_pairs(
+        starting_words.iter().map(|s| (*s).to_owned()).collect(),
+        frequencies.clone(),
+    );
 
     println!(
         "Best word pairs (score): {:#?}",
