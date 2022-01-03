@@ -13,8 +13,11 @@ favor words which do not overlap in letter content.
 Running this requires a dictionary of words, which on my system is at
 `/usr/share/dict/american-english`.
 
+If you're just trying to cheat at Wordle, the current output of this script is [here][output].
+
 ## Future work
 - [ ] make an interactive mode which tells you the best _next_ word to play
 - [ ] fully script a Wordle AI
 
+[output]: https://gist.github.com/wittrock/e6f26850290e01ffd0f09d1c1f0fb353
 [wordle]: https://www.powerlanguage.co.uk/wordle/
