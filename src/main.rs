@@ -5,6 +5,7 @@ use std::{
     fs,
     io::BufRead,
     io::BufReader,
+    sync::Arc,
     thread,
 };
 
@@ -136,8 +137,8 @@ fn score_word_pair(
 
 fn score_word_pairs_shard(
     words_to_score: Vec<String>,
-    all_words: Vec<String>,
-    letter_frequencies: BTreeMap<char, f32>,
+    all_words: Arc<Vec<String>>,
+    letter_frequencies: Arc<BTreeMap<char, f32>>,
 ) -> IndexMap<(String, String), f32> {
     // We _don't_ want to give extra credit for letters in the same position in each word,
     // since they won't help us.
@@ -171,27 +172,24 @@ fn score_word_pairs(
     all_words: Vec<String>,
     letter_frequencies: BTreeMap<char, f32>,
 ) -> IndexMap<(String, String), f32> {
-    let mut words_left = all_words.clone();
+    let all_words_arc = Arc::new(all_words.clone());
+    let mut words_left = all_words;
+    let letter_frequencies = Arc::new(letter_frequencies);
 
     let mut thread_handles = Vec::new();
 
     for _i in 0..N_THREADS {
         let words_left_length = words_left.len();
         let words_to_score = words_left.split_off(std::cmp::min(
-            words_left_length - (all_words.len() / N_THREADS),
+            words_left_length - (all_words_arc.len() / N_THREADS),
             words_left_length,
         ));
 
-        let words_to_score_clone = words_to_score.to_vec();
-        let letter_frequencies_clone = letter_frequencies.clone();
-        let all_words_clone = all_words.clone();
+        let letter_frequencies_clone = Arc::clone(&letter_frequencies);
+        let all_words_clone = Arc::clone(&all_words_arc);
 
         let thread = thread::spawn(move || {
-            score_word_pairs_shard(
-                words_to_score_clone,
-                all_words_clone,
-                letter_frequencies_clone,
-            )
+            score_word_pairs_shard(words_to_score, all_words_clone, letter_frequencies_clone)
         });
 
         thread_handles.push(thread);
@@ -208,7 +206,10 @@ fn score_word_pairs(
 
 fn main() -> std::io::Result<()> {
     println!("Parsing dictionary");
-    let dict_file = fs::File::open("/usr/share/dict/american-english")?;
+
+    let dictionary_path = std::env::args().nth(1).expect("no dictionary path given");
+
+    let dict_file = fs::File::open(dictionary_path)?;
     let buf = BufReader::new(dict_file);
     let all_words: HashSet<String> = buf
         .lines()
@@ -252,7 +253,7 @@ fn main() -> std::io::Result<()> {
 
     let pair_scores = score_word_pairs(
         starting_words.iter().map(|s| (*s).to_owned()).collect(),
-        frequencies.clone(),
+        frequencies,
     );
 
     println!(
